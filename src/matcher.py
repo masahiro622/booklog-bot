@@ -1,91 +1,92 @@
 import json
 
 from anthropic import AsyncAnthropic
-from rapidfuzz import fuzz, process
 
-from .models import Book
+from .models import Series
 
-_SELECT_TOOL = {
-    "name": "select_books",
-    "description": (
-        "ユーザーの自然言語の問い合わせに最も合致する本を、候補リストの中からidで選ぶ。"
-        "合致するものがなければ matches を空配列にする。"
-        "複数の本が同程度に当てはまり一つに絞れない場合は複数返してよい。"
-    ),
-    "input_schema": {
+_MODEL = "claude-sonnet-5-5"
+
+_INSTRUCTIONS = """\
+あなたは個人の蔵書から本を探す手伝いをします。
+後に続く「蔵書一覧」は、持っている本をシリーズ単位にまとめたもので、各行は
+「id<TAB>タイトル<TAB>著者<TAB>冊数」です。
+
+ユーザーの問い合わせに当てはまるシリーズを蔵書一覧から選び、そのidを matches に入れてください。
+- 問い合わせはタイトルや著者名とは限りません。「バスケのマンガ」「泣ける話」のような内容や
+  雰囲気での問い合わせには、作品について知っていることを使って当てはまるものを選んでください。
+- 蔵書一覧にないidは返さないでください。当てはまるものがなければ matches は空にしてください。
+- 1つに絞れない場合は複数返してかまいませんが、当てはまりそうな順に最大10件までにしてください。
+- reasoning には選んだ理由を日本語で簡潔に書いてください。
+"""
+
+_OUTPUT_FORMAT = {
+    "type": "json_schema",
+    "schema": {
         "type": "object",
         "properties": {
             "matches": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "候補リストのidのうち、問い合わせに合致するもの",
+                "description": "蔵書一覧のidのうち、問い合わせに当てはまるもの",
             },
             "reasoning": {
                 "type": "string",
                 "description": "簡潔な選定理由(日本語)",
             },
         },
-        "required": ["matches"],
+        "required": ["matches", "reasoning"],
+        "additionalProperties": False,
     },
 }
 
-_PREFILTER_LIMIT = 40
-_MODEL = "claude-sonnet-5-5"
+
+def _build_catalog(series_list: list[Series]) -> str:
+    # 毎回同じ文字列になるようにする(プロンプトキャッシュはバイト単位の前方一致)。
+    lines = [
+        "\t".join(
+            (s.series_id, s.title, s.author or "(著者不明)", f"{len(s.books)}冊")
+        )
+        for s in series_list
+    ]
+    return "## 蔵書一覧\n" + "\n".join(lines)
 
 
-def _prefilter(query: str, books: list[Book]) -> list[Book]:
-    if len(books) <= _PREFILTER_LIMIT:
-        return books
-
-    choices = {book.item_id: book.search_text() for book in books}
-    results = process.extract(
-        query, choices, scorer=fuzz.WRatio, limit=_PREFILTER_LIMIT
-    )
-    matched_ids = {item_id for _, _score, item_id in results}
-    return [book for book in books if book.item_id in matched_ids]
-
-
-async def find_matching_books(
-    client: AsyncAnthropic, query: str, books: list[Book]
-) -> tuple[list[Book], str | None]:
-    candidates = _prefilter(query, books)
-    if not candidates:
+async def find_matching_series(
+    client: AsyncAnthropic, query: str, series_list: list[Series]
+) -> tuple[list[Series], str | None]:
+    if not series_list:
         return [], None
 
-    candidate_payload = [
-        {
-            "id": book.item_id,
-            "title": book.title,
-            "author": book.author,
-            "genre": book.genre,
-            "tags": book.tags,
-        }
-        for book in candidates
-    ]
-
-    response = await client.messages.create(
+    response = await client.beta.messages.create(
         model=_MODEL,
-        max_tokens=1024,
-        tools=[_SELECT_TOOL],
-        tool_choice={"type": "tool", "name": "select_books"},
-        messages=[
+        max_tokens=16000,
+        # 拒否された場合は、拒否の種類に応じた別モデルでサーバー側が再実行する。
+        betas=["server-side-fallback-2026-07-01"],
+        fallbacks="default",
+        output_config={"effort": "low", "format": _OUTPUT_FORMAT},
+        system=[
+            {"type": "text", "text": _INSTRUCTIONS},
             {
-                "role": "user",
-                "content": (
-                    "以下は書籍候補リストです(JSON配列)。ユーザーの問い合わせに最も合致する本を"
-                    "select_booksツールで回答してください。\n\n"
-                    f"問い合わせ: {query}\n\n"
-                    f"候補リスト:\n{json.dumps(candidate_payload, ensure_ascii=False)}"
-                ),
-            }
+                "type": "text",
+                "text": _build_catalog(series_list),
+                # 蔵書一覧は数万トークンあるので、連続した問い合わせではキャッシュから読ませる。
+                "cache_control": {"type": "ephemeral"},
+            },
         ],
+        messages=[{"role": "user", "content": query}],
     )
 
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "select_books":
-            matched_ids = set(block.input.get("matches", []))
-            reasoning = block.input.get("reasoning")
-            matched_books = [b for b in candidates if b.item_id in matched_ids]
-            return matched_books, reasoning
+    if response.stop_reason == "refusal":
+        return [], None
 
-    return [], None
+    text = next(
+        (block.text for block in reversed(response.content) if block.type == "text"),
+        None,
+    )
+    if text is None:
+        return [], None
+
+    result = json.loads(text)
+    by_id = {s.series_id: s for s in series_list}
+    matched = [by_id[i] for i in result.get("matches", []) if i in by_id]
+    return matched, result.get("reasoning")

@@ -6,7 +6,9 @@ from discord import app_commands
 from dotenv import load_dotenv
 
 from .csv_loader import load_books
-from .matcher import find_matching_books
+from .matcher import find_matching_series
+from .models import Series
+from .series import group_series
 
 load_dotenv()
 
@@ -23,6 +25,7 @@ class BooklogBot(discord.Client):
         super().__init__(intents=discord.Intents.default())
         self.tree = app_commands.CommandTree(self)
         self.books = []
+        self.series = []
 
     async def setup_hook(self):
         self.reload_books()
@@ -35,9 +38,20 @@ class BooklogBot(discord.Client):
 
     def reload_books(self):
         self.books = load_books(CSV_PATH)
+        self.series = group_series(self.books)
 
 
 client = BooklogBot()
+
+
+def _format_location(series: Series) -> str:
+    locations = series.locations()
+    if len(locations) == 1:
+        return next(iter(locations)) or "(カテゴリ未設定)"
+    return "、".join(
+        f"{location or '(カテゴリ未設定)'}({count}冊)"
+        for location, count in locations.most_common()
+    )
 
 
 @client.tree.command(
@@ -47,13 +61,15 @@ client = BooklogBot()
 async def book_command(interaction: discord.Interaction, query: str):
     await interaction.response.defer(thinking=True)
 
-    if not client.books:
+    if not client.series:
         await interaction.followup.send(
             "蔵書データが読み込まれていません。`/reload_books` を実行してください。"
         )
         return
 
-    matches, _reasoning = await find_matching_books(anthropic_client, query, client.books)
+    matches, _reasoning = await find_matching_series(
+        anthropic_client, query, client.series
+    )
 
     if not matches:
         await interaction.followup.send(
@@ -62,15 +78,17 @@ async def book_command(interaction: discord.Interaction, query: str):
         return
 
     if len(matches) == 1:
-        b = matches[0]
-        location = b.category or "(カテゴリ未設定)"
-        await interaction.followup.send(f"**{b.title}**({b.author})\n場所: {location}")
+        s = matches[0]
+        await interaction.followup.send(
+            f"**{s.title}**({s.author}・{len(s.books)}冊)\n場所: {_format_location(s)}"
+        )
         return
 
     lines = [f"候補が複数見つかりました({len(matches)}件):"]
-    for b in matches[:10]:
-        location = b.category or "(カテゴリ未設定)"
-        lines.append(f"- {b.title}({b.author}) — 場所: {location}")
+    for s in matches[:10]:
+        lines.append(
+            f"- {s.title}({s.author}・{len(s.books)}冊) — 場所: {_format_location(s)}"
+        )
     await interaction.followup.send("\n".join(lines))
 
 
@@ -78,7 +96,7 @@ async def book_command(interaction: discord.Interaction, query: str):
 async def reload_books_command(interaction: discord.Interaction):
     client.reload_books()
     await interaction.response.send_message(
-        f"蔵書データを再読み込みしました({len(client.books)}件)。"
+        f"蔵書データを再読み込みしました({len(client.books)}冊・{len(client.series)}シリーズ)。"
     )
 
 
