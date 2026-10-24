@@ -1,5 +1,8 @@
+import json
+import logging
 import os
 
+import anthropic
 import discord
 from anthropic import AsyncAnthropic
 from discord import app_commands
@@ -17,6 +20,8 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 CSV_PATH = os.environ.get("BOOKLOG_CSV_PATH", "./data/booklog_export.csv")
 GUILD_ID = os.environ.get("DISCORD_GUILD_ID")
 
+logger = logging.getLogger(__name__)
+
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
 
@@ -28,7 +33,11 @@ class BooklogBot(discord.Client):
         self.series = []
 
     async def setup_hook(self):
-        self.reload_books()
+        # CSVがなくてもBot自体は起動させ、/reload_books で後から読み込めるようにする。
+        try:
+            self.reload_books()
+        except (OSError, UnicodeDecodeError):
+            logger.exception("蔵書CSVの読み込みに失敗しました: %s", CSV_PATH)
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
             self.tree.copy_global_to(guild=guild)
@@ -68,9 +77,25 @@ async def book_command(interaction: discord.Interaction, query: str):
         )
         return
 
-    matches, _reasoning = await find_matching_series(
-        anthropic_client, query, client.series
-    )
+    # 例外をそのまま投げると、Discord上は「考え中…」のまま応答が返らなくなる。
+    try:
+        matches, _reasoning = await find_matching_series(
+            anthropic_client, query, client.series
+        )
+    except anthropic.APIError:
+        logger.exception("Claude APIの呼び出しに失敗しました")
+        await interaction.followup.send(
+            "検索中にエラーが発生しました。しばらくしてからもう一度お試しください。",
+            ephemeral=True,
+        )
+        return
+    except json.JSONDecodeError:
+        logger.exception("Claudeの応答をJSONとして解釈できませんでした")
+        await interaction.followup.send(
+            "検索結果を読み取れませんでした。問い合わせの言い方を変えてお試しください。",
+            ephemeral=True,
+        )
+        return
 
     if not matches:
         await interaction.followup.send(
@@ -96,7 +121,14 @@ async def book_command(interaction: discord.Interaction, query: str):
 
 @client.tree.command(name="reload_books", description="ブクログCSVを再読み込みします")
 async def reload_books_command(interaction: discord.Interaction):
-    client.reload_books()
+    try:
+        client.reload_books()
+    except (OSError, UnicodeDecodeError) as e:
+        logger.exception("蔵書CSVの読み込みに失敗しました: %s", CSV_PATH)
+        await interaction.response.send_message(
+            f"蔵書データを読み込めませんでした: {e}", ephemeral=True
+        )
+        return
     await interaction.response.send_message(
         f"蔵書データを再読み込みしました({len(client.books)}冊・{len(client.series)}シリーズ)。",
         ephemeral=True,
