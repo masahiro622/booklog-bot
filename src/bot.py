@@ -59,11 +59,12 @@ def _format_location(series: Series) -> str:
 )
 @app_commands.describe(query="探したい本の特徴や内容(自然言語でOK)")
 async def book_command(interaction: discord.Interaction, query: str):
-    await interaction.response.defer(thinking=True)
+    await interaction.response.defer(thinking=True, ephemeral=True)
 
     if not client.series:
         await interaction.followup.send(
-            "蔵書データが読み込まれていません。`/reload_books` を実行してください。"
+            "蔵書データが読み込まれていません。`/reload_books` を実行してください。",
+            ephemeral=True,
         )
         return
 
@@ -73,14 +74,15 @@ async def book_command(interaction: discord.Interaction, query: str):
 
     if not matches:
         await interaction.followup.send(
-            f"「{query}」に合致する本が見つかりませんでした。"
+            f"「{query}」に合致する本が見つかりませんでした。", ephemeral=True
         )
         return
 
     if len(matches) == 1:
         s = matches[0]
         await interaction.followup.send(
-            f"**{s.title}**({s.author}・{len(s.books)}冊)\n場所: {_format_location(s)}"
+            f"**{s.title}**({s.author}・{len(s.books)}冊)\n場所: {_format_location(s)}",
+            ephemeral=True,
         )
         return
 
@@ -89,14 +91,15 @@ async def book_command(interaction: discord.Interaction, query: str):
         lines.append(
             f"- {s.title}({s.author}・{len(s.books)}冊) — 場所: {_format_location(s)}"
         )
-    await interaction.followup.send("\n".join(lines))
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
 
 
 @client.tree.command(name="reload_books", description="ブクログCSVを再読み込みします")
 async def reload_books_command(interaction: discord.Interaction):
     client.reload_books()
     await interaction.response.send_message(
-        f"蔵書データを再読み込みしました({len(client.books)}冊・{len(client.series)}シリーズ)。"
+        f"蔵書データを再読み込みしました({len(client.books)}冊・{len(client.series)}シリーズ)。",
+        ephemeral=True,
     )
 
 
