@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -16,7 +17,16 @@ class Book:
     pub_year: str
     genre: str
 
-    def search_text(self) -> str:
-        return " ".join(
-            part for part in (self.title, self.author, self.genre, self.tags) if part
-        )
+
+@dataclass
+class Series:
+    """巻数・レーベル表記を除いたタイトルと著者でまとめた本のグループ。"""
+
+    series_id: str
+    title: str
+    author: str
+    books: list[Book] = field(default_factory=list)
+
+    def locations(self) -> Counter[str]:
+        """保管場所ごとの冊数。カテゴリ未設定の本は空文字で数える。"""
+        return Counter(book.category for book in self.books)
