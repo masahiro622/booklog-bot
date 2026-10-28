@@ -4,7 +4,7 @@ from anthropic import AsyncAnthropic
 
 from .models import Series
 
-_MODEL = "claude-sonnet-5-5"
+_MODEL = "claude-haiku-5-5"
 
 _INSTRUCTIONS = """\
 あなたは個人の蔵書から本を探す手伝いをします。
@@ -43,9 +43,7 @@ _OUTPUT_FORMAT = {
 def _build_catalog(series_list: list[Series]) -> str:
     # 毎回同じ文字列になるようにする(プロンプトキャッシュはバイト単位の前方一致)。
     lines = [
-        "\t".join(
-            (s.series_id, s.title, s.author or "(著者不明)", f"{len(s.books)}冊")
-        )
+        "\t".join((s.series_id, s.title, s.author or "(著者不明)", f"{len(s.books)}冊"))
         for s in series_list
     ]
     return "## 蔵書一覧\n" + "\n".join(lines)
